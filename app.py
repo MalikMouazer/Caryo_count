@@ -70,6 +70,38 @@ def format_anomalies_html(anomalies_df):
         """
     return html
 
+# Fonction pour un affichage compact similaire à l'analyse par fichier
+def format_anomalies_compact(anomalies_df):
+    """Renvoie un HTML condensé pour la liste des anomalies"""
+    html = ""
+    for _, row in anomalies_df.iterrows():
+        score = row['Score ISCN 2024']
+        anomalie = row['Anomalie']
+        clones_list = row['Clones'].split(', ')
+        clones_clean = list(dict.fromkeys(clones_list))
+        clones = ', '.join(clones_clean)
+        explication = row['Explication']
+
+        if score == 2:
+            color = "#FF5733"
+            score_text = "2pts"
+        elif score == 1:
+            color = "#33A1FF"
+            score_text = "1pt"
+        else:
+            color = "#AAAAAA"
+            score_text = "0pt"
+
+        html += f"""
+        <div style="margin: 2px 0; padding: 4px 8px; border-left: 3px solid {color}; background-color: #f9f9f9; font-size: 14px;">
+            <span style="font-weight: bold;">{clones}</span>
+            <span style="color: {color}; font-weight: bold;">[{anomalie}]</span>
+            <span style="background-color: #555; color: white; border-radius: 8px; padding: 1px 6px; font-size: 12px;">{score_text}</span>
+            <span style="color: #666; margin-left: 8px;">{explication}</span>
+        </div>
+        """
+    return html
+
 # Interface utilisateur
 st.markdown("""
 Cette application permet d'analyser des formules caryotypiques (notation ISCN) pour :
@@ -99,7 +131,7 @@ with tab1:
                 
                 # Formatage des anomalies pour l'affichage
                 anomalies_df = df.iloc[:-1]  # Exclure la ligne TOTAL
-                anomalies_html = format_anomalies_html(anomalies_df)
+                anomalies_html = format_anomalies_compact(anomalies_df)
                 st.markdown(anomalies_html, unsafe_allow_html=True)
                 
                 # Affichage du total
@@ -120,22 +152,31 @@ with tab2:
             else:  # Excel
                 df_input = pd.read_excel(uploaded_file)
             
-            # Vérifier si la colonne Karyotype existe
-            if 'Karyotype' not in df_input.columns:
-                st.error("Le fichier doit contenir au moins une colonne 'Karyotype'.")
+            # Rechercher la colonne Formule de manière insensible à la casse
+            formule_col = None
+            for col in df_input.columns:
+                if col.strip().lower() == 'formule':
+                    formule_col = col
+                    break
+
+            if formule_col is None:
+                st.error("Le fichier doit contenir au moins une colonne 'Formule'.")
             else:
+                # Renommer la colonne trouvée en 'Formule' pour simplifier la suite
+                if formule_col != 'Formule':
+                    df_input = df_input.rename(columns={formule_col: 'Formule'})
                 # Vérifier si la colonne Count existe
                 has_count = 'Count' in df_input.columns
                 
                 # Création du DataFrame de résultats
                 results = []
                 all_anomalies_details = []
-                
+
                 for idx, row in df_input.iterrows():
-                    karyotype = row['Karyotype']
+                    formule_fichier = row['Formule']
                     count_manuel = row['Count'] if has_count else None
-                    
-                    df_analyse, count_auto, error = analyser_formule(karyotype)
+
+                    df_analyse, count_auto, error = analyser_formule(formule_fichier)
                     
                     if error:
                         anomalies_detail = error
@@ -158,7 +199,8 @@ with tab2:
                         match = "✅" if has_count and count_auto == count_manuel else "❌" if has_count else "N/A"
                     
                     result_row = {
-                        "Formule": karyotype,
+                        "Ligne": idx + 2,  # +2 pour inclure l'en-tête du fichier
+                        "Formule": formule_fichier,
                         "Comptage automatique": count_auto if not error else "Erreur",
                         "Anomalies détectées": anomalies_detail  # Version texte pour l'export
                     }
@@ -177,15 +219,17 @@ with tab2:
                 st.markdown("### Résultats de l'analyse")
                 
                 # Créer un en-tête de tableau personnalisé
-                cols = st.columns([3, 1, 1, 1, 4] if has_count else [3, 1, 6])
+                cols = st.columns([1, 3, 1, 1, 1, 4] if has_count else [1, 3, 1, 6])
                 with cols[0]:
-                    st.markdown("**Formule**")
+                    st.markdown("**Ligne**")
                 with cols[1]:
+                    st.markdown("**Formule**")
+                with cols[2]:
                     st.markdown("**Comptage auto**")
                 if has_count:
-                    with cols[2]:
-                        st.markdown("**Comptage manuel**")
                     with cols[3]:
+                        st.markdown("**Comptage manuel**")
+                    with cols[4]:
                         st.markdown("**Correspondance**")
                 with cols[-1]:
                     st.markdown("**Anomalies détectées**")
@@ -193,62 +237,36 @@ with tab2:
                 # Afficher chaque ligne avec un expander pour les anomalies
                 for i, (_, row_data) in enumerate(results_df.iterrows()):
                     anomalies = all_anomalies_details[i]
-                    
+
                     # Créer une ligne de tableau
-                    cols = st.columns([3, 1, 1, 1, 4] if has_count else [3, 1, 6])
-                    
-                    # Formule
+                    cols = st.columns([1, 3, 1, 1, 1, 4] if has_count else [1, 3, 1, 6])
+
+                    # Numéro de ligne
                     with cols[0]:
-                        st.markdown(f"{row_data['Formule']}")
-                    
-                    # Comptage automatique
+                        st.markdown(f"{row_data['Ligne']}")
+
+                    # Formule
                     with cols[1]:
+                        st.markdown(f"{row_data['Formule']}")
+
+                    # Comptage automatique
+                    with cols[2]:
                         st.markdown(f"{row_data['Comptage automatique']}")
-                    
+
                     # Comptage manuel et correspondance (si disponible)
                     if has_count:
-                        with cols[2]:
-                            st.markdown(f"{row_data['Comptage manuel']}")
                         with cols[3]:
+                            st.markdown(f"{row_data['Comptage manuel']}")
+                        with cols[4]:
                             st.markdown(f"{row_data['Correspondance']}")
-                    
+
                     # Anomalies détectées avec expander
-                    with cols[-1]:                        
+                    with cols[-1]:
                         if anomalies["error"]:
                             st.error(anomalies["message"])
                         else:
-                            # Affichage compact : une ligne par anomalie
-                            for _, anom_row in anomalies["df"].iterrows():
-                                score = anom_row['Score ISCN 2024']
-                                anomalie = anom_row['Anomalie']
-                                clones_list = anom_row['Clones'].split(', ')
-                                clones_clean = list(dict.fromkeys(clones_list))  # Préserve l'ordre, supprime doublons
-                                clones = ', '.join(clones_clean)
-                                explication = anom_row['Explication']
-                                
-                                # Déterminer la couleur selon le score
-                                if score == 2:
-                                    color = "#FF5733"  # Rouge
-                                    score_text = "2pts"
-                                elif score == 1:
-                                    color = "#33A1FF"  # Bleu  
-                                    score_text = "1pt"
-                                else:
-                                    color = "#AAAAAA"  # Gris
-                                    score_text = "0pt"
-                                
-                                # Affichage compact sur une ligne
-                                st.markdown(
-                                    f"""
-                                    <div style="margin: 2px 0; padding: 4px 8px; border-left: 3px solid {color}; background-color: #f9f9f9; font-size: 14px;">
-                                        <span style="font-weight: bold;">{clones}</span> 
-                                        <span style="color: {color}; font-weight: bold;">[{anomalie}]</span> 
-                                        <span style="background-color: #555; color: white; border-radius: 8px; padding: 1px 6px; font-size: 12px;">{score_text}</span>
-                                        <span style="color: #666; margin-left: 8px;">{explication}</span>
-                                    </div>
-                                    """,
-                                    unsafe_allow_html=True
-                                )
+                            html = format_anomalies_compact(anomalies["df"])
+                            st.markdown(html, unsafe_allow_html=True)
                                         
                     # Ligne de séparation
                     st.markdown("---")
