@@ -9,7 +9,7 @@ def get_chromosomes(anom):
     basé sur les notations avant chaque parenthèse de type der, del, dup, ins, t, i, ider, idic.
     """
     nums = set()
-    for m in re.finditer(r'(?:der|del|dup|ins|t|i|ider|idic|r)\(([0-9;]+)', anom):
+    for m in re.finditer(r'(?:der|dic|del|dup|ins|t|i|ider|idic|r)\(([0-9;]+)', anom):
         for num in m.group(1).split(';'):
             nums.add(num)
     return nums
@@ -80,8 +80,8 @@ def is_unbalanced_translocation(anom):
     - chromosome dérivé (der(...)) contenant un t(...) ou
     - tout t(...) non pure
     """
-    # Cas d'un chromosome dérivé comportant une translocation
-    if 'der' in anom and 't(' in anom:
+    # Cas d'un chromosome dérivé ou dicentrique comportant une translocation
+    if ('der' in anom or 'dic' in anom) and 't(' in anom:
         return True
     # Cas d'un t(...) quelconque non pur (équilibré)
     if 't(' in anom and not is_balanced_translocation(anom):
@@ -106,8 +106,8 @@ def is_complex_multichr_deseq(anom):
     # si un seul chromosome impliqué -> pas multi-chromosomique déséquilibrée
     if len(chroms) <= 1:
         return False
-    # dérivé ou anneau -> complexe multi-chromosomique
-    if anom.startswith('der') or anom.startswith('r('):
+    # dérivé, chromosome dicentrique ou anneau -> complexe multi-chromosomique
+    if anom.startswith('der') or anom.startswith('dic') or anom.startswith('r('):
         return True
     # insertion non pure -> complexe
     if 'ins(' in anom and not is_balanced_insertion(anom):
@@ -159,6 +159,8 @@ def type_anomalie(anom):
         return 'Délétion'
     if anom.startswith('trp'):
         return 'Triplication/Quadruplication'
+    if anom.startswith('dic'):
+        return 'Chromosome dicentrique'
     if anom.startswith('idic'):
         return 'Isodicentric chromosome'
     if anom.startswith('ider'):
@@ -168,6 +170,70 @@ def type_anomalie(anom):
     return 'Autre'
 
 # Calcul des scores
+def normalize_anomaly(anom: str) -> str:
+    """Normalise une anomalie pour le scoring.
+
+    - Supprime un éventuel point d'interrogation en début d'anomalie
+      ("?dic" -> "dic").
+    """
+    norm = anom.lstrip('?')
+    return norm
+
+
+def detect_implicit_anomalies(anomalies):
+    """Détecte les anomalies implicites et renvoie un dict.
+
+    Le dict a pour clé l'anomalie normalisée et pour valeur un
+    dictionnaire avec la clef ``reason`` décrivant la cause et ``ref``
+    l'anomalie de référence à afficher entre parenthèses.
+    """
+    norm_counts = Counter(normalize_anomaly(a) for a in anomalies)
+    # mappage normalisé -> version originale pour l'affichage
+    norm_to_orig = {}
+    for a in anomalies:
+        norm = normalize_anomaly(a)
+        norm_to_orig.setdefault(norm, a)
+
+    implicit = {}
+
+    # 1) Dérivés implicites s'il existe une version explicite (add/del/dup)
+    t_events = {}
+    for an in norm_counts:
+        m = re.match(r"(?:der|dic)\((\d+)\).*t\((\d+);(\d+)\)", an)
+        if m:
+            _, A, B = m.groups()
+            key = tuple(sorted([A, B]))
+            t_events.setdefault(key, []).append(an)
+    for ders in t_events.values():
+        explicits = [d for d in ders if re.search(r"add|del|dup", d)]
+        if explicits:
+            ref = norm_to_orig[explicits[0]]
+            for d in ders:
+                if d not in explicits:
+                    implicit[d] = {"reason": "Dérivé implicite", "ref": ref}
+
+    # 2) Gains/pertes simples issus d'un dérivé multi-chromosomique
+    multi_der = {}
+    for an in norm_counts:
+        if an.startswith(('der', 'dic')):
+            m = re.match(r"^(?:der|dic)\(([0-9;]+)\)", an)
+            if m:
+                chrs = m.group(1).split(';')
+                if len(chrs) > 1:
+                    for c in chrs:
+                        multi_der.setdefault(c, []).append(an)
+
+    for an in norm_counts:
+        if an.startswith(('+', '-')):
+            num = re.sub(r"\D", "", an)
+            if num in multi_der:
+                ref_norm = multi_der[num][0]
+                ref = norm_to_orig.get(ref_norm, ref_norm)
+                implicit[an] = {"reason": "Gain/perte implicite", "ref": ref}
+
+    return implicit
+
+
 def calcul_scores(anomalies, clone_map):
     """
     Calcule les scores selon deux méthodes:
@@ -179,79 +245,58 @@ def calcul_scores(anomalies, clone_map):
       - 1 pt pour anomalies standard
     """
     counts = Counter(anomalies)
+    norm_counts = Counter(normalize_anomaly(a) for a in anomalies)
 
-    # 1) Collecte des dérivés implicites pour chaque dérivé suivi d'un t(A;B)
-    implicit = set()
-    t_events = {}
-    for an in counts:
-        m = re.match(r"der\((\d+)\).*t\((\d+);(\d+)\)", an)
-        if m:
-            _, A, B = m.groups()
-            key = tuple(sorted([A, B]))
-            t_events.setdefault(key, []).append(an)
-    for ders in t_events.values():
-        # on considère « explicites » ceux qui ont add/del/dup
-        explicits = [d for d in ders if re.search(r"add|del|dup", d)]
-        if explicits:
-            for d in ders:
-                if d not in explicits:
-                    implicit.add(d)
-
-    # 2) Repérage des chr issus de dérivés multi-chr (der(X;Y))
-    multi_der_chrs = set()
-    for an in counts:
-        if an.startswith("der"):
-            m = re.match(r"^der\(([0-9;]+)\)", an)
-            if m:
-                chrs = m.group(1).split(";")
-                if len(chrs) > 1:
-                    multi_der_chrs.update(chrs)
+    implicit_info = detect_implicit_anomalies(anomalies)
 
     rows = []
     total_j = total_i = 0
 
     for anom, cnt in counts.items():
         score_j = 1  # Jondreville = 1 pour toutes
+        norm = normalize_anomaly(anom)
+        cnt_norm = norm_counts[norm]
 
         # a) Constitutionnelles (+Nc) → ISCN = 0
-        if re.match(r"^\+\d+c$", anom):
+        if re.match(r"^\+\d+c$", norm):
             score_i = 0
             explication = "Anomalie constitutionnelle (0 point)"
 
-        # b) Dérivés implicites repérés plus haut → ISCN = 0
-        elif anom in implicit:
+        # b) Anomalies détectées comme implicites
+        elif norm in implicit_info:
+            info = implicit_info[norm]
             score_i = 0
-            explication = "Dérivé implicite (0 point)"
+            explication = f"{info['reason']} ({info['ref']}) (0 point)"
 
-        # c) Gains/pertes simples dans un der multi-chr → ISCN = 0
-        elif anom.startswith(("+", "-")):
-            num = re.sub(r"\D", "", anom)
-            if num in multi_der_chrs:
-                score_i = 0
-                explication = "Gain/perte simple dans un dérivé multi-chromosomique (0 point)"
-            else:
-                if is_single_chr_deseq(anom, cnt):
-                    score_i = 2
-                    explication = "Déséquilibre unichromosomique (2 points)"
-                elif is_complex_multichr_deseq(anom):
-                    score_i = 2
-                    explication = "Déséquilibre multichromosomique complexe (2 points)"
-                elif is_unbalanced_translocation(anom):
-                    score_i = 2
-                    explication = "Translocation déséquilibrée (2 points)"
-                else:
-                    score_i = 1
-                    explication = "Anomalie standard (1 point)"
-
-        # d) Toutes les autres anomalies → scoring standard
-        else:
-            if is_single_chr_deseq(anom, cnt):
+        # c) Gains/pertes simples (analyse standard si non implicite)
+        elif norm.startswith(("+", "-")):
+            if is_single_chr_deseq(norm, cnt_norm):
                 score_i = 2
                 explication = "Déséquilibre unichromosomique (2 points)"
-            elif is_complex_multichr_deseq(anom):
+            elif is_complex_multichr_deseq(norm):
                 score_i = 2
                 explication = "Déséquilibre multichromosomique complexe (2 points)"
-            elif is_unbalanced_translocation(anom):
+            elif is_unbalanced_translocation(norm):
+                score_i = 2
+                explication = "Translocation déséquilibrée (2 points)"
+            else:
+                score_i = 1
+                explication = "Anomalie standard (1 point)"
+
+        # d) Chromosomes dicentriques → 2 points
+        elif norm.startswith('dic'):
+            score_i = 2
+            explication = "Chromosome dicentrique (2 points)"
+
+        # e) Toutes les autres anomalies → scoring standard
+        else:
+            if is_single_chr_deseq(norm, cnt_norm):
+                score_i = 2
+                explication = "Déséquilibre unichromosomique (2 points)"
+            elif is_complex_multichr_deseq(norm):
+                score_i = 2
+                explication = "Déséquilibre multichromosomique complexe (2 points)"
+            elif is_unbalanced_translocation(norm):
                 score_i = 2
                 explication = "Translocation déséquilibrée (2 points)"
             else:
@@ -263,7 +308,7 @@ def calcul_scores(anomalies, clone_map):
 
         rows.append({
             "Anomalie": anom,
-            "Type": type_anomalie(anom),
+            "Type": type_anomalie(norm),
             "Explication": explication,
             "Occurrences": cnt,
             "Clones": ", ".join(clone_map.get(anom, [])),

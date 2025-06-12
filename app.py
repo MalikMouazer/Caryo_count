@@ -199,7 +199,8 @@ with tab2:
                         match = "✅" if has_count and count_auto == count_manuel else "❌" if has_count else "N/A"
                     
                     result_row = {
-                        "Ligne": idx + 2,  # +2 pour inclure l'en-tête du fichier
+                        # Ne pas compter la ligne d'en-tête
+                        "Ligne": idx + 1,
                         "Formule": formule_fichier,
                         "Comptage automatique": count_auto if not error else "Erreur",
                         "Anomalies détectées": anomalies_detail  # Version texte pour l'export
